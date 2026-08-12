@@ -13,6 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Show git info
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          echo "branch: $(git branch --show-current)"
+          git log --oneline -3
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -21,11 +27,23 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Install dependencies (including dev)
+      - name: Install SDK dependencies
         run: uv sync --frozen
 
-      - name: Run unit tests
+      - name: Install samples dependencies
+        run: uv pip install -r a2a-t-sample/requirements.txt
+
+      - name: Register samples src path
+        run: |
+          src=$(cd a2a-t-sample/src && pwd)
+          venv_site=$(.venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+          echo "$src" > "$venv_site/samples.pth"
+
+      - name: Run SDK tests
         run: uv run pytest tests/ -v --tb=short
+
+      - name: Run samples tests
+        run: uv run pytest a2a-t-sample/test/ -v --tb=short
 
   lint:
     name: Lint + Type-check (advisory)
@@ -34,6 +52,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Show git info
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          echo "branch: $(git branch --show-current)"
+          git log --oneline -3
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -42,11 +66,78 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Install dependencies (including dev)
+      - name: Install SDK dependencies
         run: uv sync --frozen
 
-      - name: Lint with ruff
+      - name: Lint SDK with ruff
         run: uv run ruff check src tests
+
+      - name: Lint samples with ruff
+        working-directory: a2a-t-sample
+        run: uv run ruff check src test
 
       - name: Type-check with mypy
         run: uv run mypy src
+
+  e2e-test:
+    name: E2E Samples Test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show git info
+        run: |
+          echo "commit: $(git rev-parse HEAD)"
+          echo "branch: $(git branch --show-current)"
+          git log --oneline -3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install SDK dependencies
+        run: uv sync --frozen
+
+      - name: Install samples dependencies
+        run: uv pip install -r a2a-t-sample/requirements.txt
+
+      - name: Register samples src path
+        run: |
+          src=$(cd a2a-t-sample/src && pwd)
+          venv_site=$(.venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+          echo "$src" > "$venv_site/samples.pth"
+
+      - name: Create .env
+        run: |
+          cp a2a-t-sample/env.example .env
+          sed -i 's|A2AT_LLM_API_KEY=.*|A2AT_LLM_API_KEY=${{ secrets.A2AT_LLM_API_KEY }}|' .env
+
+      - name: Start services
+        run: |
+          nohup uv run python -m agentcard_example.registry_main > registry.log 2>&1 &
+          echo $! > registry.pid
+          sleep 2
+          nohup uv run python -m server_example.server_main > server.log 2>&1 &
+          echo $! > server.pid
+          sleep 3
+
+      - name: Run e2e client
+        run: uv run python a2a-t-sample/e2e_test.py 2>&1 | tee client.log
+
+      - name: Show logs
+        if: always()
+        run: |
+          echo "=== registry.log ===" && cat registry.log 2>/dev/null || true
+          echo "=== server.log ===" && cat server.log 2>/dev/null || true
+          echo "=== client.log ===" && cat client.log 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill $(cat registry.pid 2>/dev/null) 2>/dev/null || true
+          kill $(cat server.pid 2>/dev/null) 2>/dev/null || true
